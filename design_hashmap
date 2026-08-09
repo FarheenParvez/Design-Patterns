@@ -1,0 +1,139 @@
+#include <iostream>
+#include <vector>
+#include <list>
+using namespace std;
+
+class HashMap {
+private:
+    int currSize;
+    int bucketCount;
+    const float LOAD_FACTOR = 0.75;
+
+    // Each bucket stores {key, value}
+    vector<list<pair<int, int>>> buckets;
+
+    int hashFunction(int key) {
+        return key % bucketCount;
+    }
+
+    void rehash() {
+        // Save old buckets
+        auto oldBuckets = buckets;
+
+        // Double the bucket count
+        bucketCount *= 2;
+
+        // Create new empty buckets
+        buckets.clear();
+        buckets.resize(bucketCount);
+
+        // Reset size since put() will increment it again
+        currSize = 0;
+
+        // Reinsert all elements
+        for (auto &bucket : oldBuckets) {
+            for (auto &node : bucket) {
+                put(node.first, node.second);
+            }
+        }
+    }
+
+public:
+    HashMap(int n = 5) {
+        bucketCount = n;
+        currSize = 0;
+        buckets.resize(bucketCount);
+    }
+
+    void put(int key, int value) {
+
+        int idx = hashFunction(key);
+
+        // Update if key already exists
+        for (auto &node : buckets[idx]) {
+            if (node.first == key) {
+                node.second = value;
+                return;
+            }
+        }
+
+        // Insert new key
+        buckets[idx].emplace_back(key, value);
+        currSize++;
+
+        // Check load factor
+        float loadFactor = (float)currSize / bucketCount;
+
+        if (loadFactor > LOAD_FACTOR) {
+            rehash();
+        }
+    }
+
+    int get(int key) {
+
+        int idx = hashFunction(key);
+
+        for (auto &node : buckets[idx]) {
+            if (node.first == key)
+                return node.second;
+        }
+
+        return -1;
+    }
+
+    void remove(int key) {
+
+        int idx = hashFunction(key);
+
+        for (auto it = buckets[idx].begin();
+             it != buckets[idx].end();
+             ++it) {
+
+            if (it->first == key) {
+                buckets[idx].erase(it);
+                currSize--;
+                return;
+            }
+        }
+    }
+
+    void display() {
+
+        for (int i = 0; i < bucketCount; i++) {
+
+            cout << "Bucket " << i << " : ";
+
+            for (auto &node : buckets[i]) {
+                cout << "(" << node.first << "," << node.second << ") ";
+            }
+
+            cout << "\n";
+        }
+
+        cout << "Current Size : " << currSize << endl;
+        cout << "Bucket Count : " << bucketCount << endl;
+        cout << "Load Factor  : " << (float)currSize / bucketCount << endl;
+    }
+};
+
+int main() {
+
+    HashMap mp;
+
+    mp.put(1, 10);
+    mp.put(2, 20);
+    mp.put(3, 30);
+    mp.put(4, 40);
+    mp.put(5, 50);
+    mp.put(6, 60);      // Triggers rehash
+
+    mp.display();
+
+    cout << mp.get(4) << endl;
+
+    mp.remove(4);
+
+    cout << mp.get(4) << endl;
+
+    return 0;
+}
