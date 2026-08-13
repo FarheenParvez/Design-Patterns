@@ -1,0 +1,886 @@
+# Rate Limiter LLD Interview Notes
+
+## 1. Problem
+
+Design a Rate Limiter that decides whether an incoming request should be:
+
+* **Allowed**
+* **Rejected**
+
+For our basic design, rate limiting is **per `userId`**.
+
+Example:
+
+```text
+5 requests / 60 seconds / user
+```
+
+---
+
+# 2. Actors
+
+For the basic system:
+
+### Client
+
+The client wants to make a request.
+
+```text
+Client
+   |
+   | allowRequest(userId)
+   ↓
+RateLimiter
+```
+
+### Server / Service
+
+The actual server processes the request if it is allowed.
+
+We discussed both client-side and server-side rate limiting:
+
+```text
+Client
+   |
+   ↓
+Client-side RateLimiter
+   |
+   ↓
+Server
+   |
+   ↓
+Server-side RateLimiter
+   |
+   ↓
+Service
+```
+
+Important:
+
+* Client-side limiter prevents the client from unnecessarily sending too many requests.
+* Server-side limiter protects the server.
+* Client-side rate limiting cannot be trusted for server enforcement because a client can bypass it.
+
+---
+
+# 3. Main Use Case
+
+The main operation is:
+
+```cpp
+bool allowRequest(string userId);
+```
+
+The client asks:
+
+> "Am I allowed to make this request?"
+
+The answer is:
+
+```text
+true  → ALLOW
+false → REJECT
+```
+
+For our interview-level design, `bool` is enough.
+
+A production implementation could return richer information such as:
+
+```text
+ALLOWED
+RATE_LIMITED
+RETRY_AFTER
+```
+
+But don't overcomplicate the 30–40 minute interview unless asked.
+
+---
+
+# 4. Core Classes
+
+Our core design:
+
+```text
+Client
+   |
+   ↓
+RateLimiter
+   |
+   ↓
+RateLimitingStrategy
+   |
+   +── FixedWindowStrategy
+   +── SlidingWindowStrategy
+   +── TokenBucketStrategy
+   +── LeakyBucketStrategy
+```
+
+And configuration/state are handled separately.
+
+---
+
+# 5. RateLimiter
+
+`RateLimiter` is the main entry point.
+
+Its responsibility is **NOT** to implement the rate-limiting algorithm.
+
+It simply delegates the decision to the configured strategy.
+
+```text
+Client
+   |
+   ↓
+RateLimiter
+   |
+   ↓
+Strategy
+   |
+   ↓
+ALLOW / REJECT
+```
+
+Interface:
+
+```cpp
+class RateLimiter {
+    unique_ptr<RateLimitingStrategy> strategy;
+
+public:
+    bool allowRequest(const string& userId);
+};
+```
+
+### Important
+
+`RateLimiter` should NOT know:
+
+* how Fixed Window works
+* how Token Bucket works
+* whether timestamps are stored
+* whether tokens are stored
+* how counters are maintained
+
+It only knows:
+
+```cpp
+strategy->allowRequest(userId);
+```
+
+This is **encapsulation**.
+
+---
+
+# 6. Strategy Pattern
+
+We use the **Strategy Pattern** because we have multiple algorithms that perform the same operation.
+
+Common interface:
+
+```cpp
+class RateLimitingStrategy {
+public:
+    virtual bool allowRequest(const string& userId) = 0;
+    virtual ~RateLimitingStrategy() = default;
+};
+```
+
+Concrete implementations:
+
+```text
+RateLimitingStrategy
+        |
+        +── FixedWindowStrategy
+        |
+        +── SlidingWindowStrategy
+        |
+        +── TokenBucketStrategy
+        |
+        +── LeakyBucketStrategy
+```
+
+All expose:
+
+```cpp
+allowRequest(userId)
+```
+
+but implement it differently.
+
+### Why Strategy?
+
+Because tomorrow we can replace:
+
+```text
+Fixed Window
+```
+
+with:
+
+```text
+Token Bucket
+```
+
+without modifying `RateLimiter` or `Client`.
+
+This follows the:
+
+**Open/Closed Principle**
+
+> Open for extension, closed for modification.
+
+---
+
+# 7. Composition vs Inheritance
+
+`RateLimiter` should **contain** a strategy.
+
+It should NOT inherit from `RateLimitingStrategy`.
+
+Correct:
+
+```text
+RateLimiter
+    |
+    | HAS-A
+    ↓
+RateLimitingStrategy
+```
+
+Incorrect:
+
+```text
+RateLimiter IS-A RateLimitingStrategy
+```
+
+Why?
+
+Because a `RateLimiter` is not itself an algorithm.
+
+It **uses an algorithm**.
+
+This is composition.
+
+---
+
+# 8. unique_ptr and Ownership
+
+We used:
+
+```cpp
+unique_ptr<RateLimitingStrategy> strategy;
+```
+
+This means:
+
+> `RateLimiter` owns the strategy object.
+
+Constructor:
+
+```cpp
+RateLimiter(unique_ptr<RateLimitingStrategy> strategy)
+    : strategy(move(strategy)) {}
+```
+
+### Why `move()`?
+
+`unique_ptr` cannot be copied because it represents **exclusive ownership**.
+
+Example:
+
+```cpp
+auto strategy =
+    make_unique<TokenBucketStrategy>();
+
+RateLimiter limiter(move(strategy));
+```
+
+Before:
+
+```text
+strategy
+   |
+   ↓
+TokenBucketStrategy
+```
+
+After:
+
+```text
+RateLimiter
+    |
+    ↓
+strategy ───→ TokenBucketStrategy
+```
+
+The original `strategy` pointer becomes empty.
+
+So:
+
+```cpp
+move(strategy)
+```
+
+means:
+
+> Transfer ownership of the strategy object to `RateLimiter`.
+
+### Important distinction
+
+This:
+
+```cpp
+strategy(move(strategy))
+```
+
+**transfers ownership.**
+
+This:
+
+```cpp
+strategy->allowRequest(userId);
+```
+
+**uses the strategy object.**
+
+The second one does NOT move anything.
+
+---
+
+# 9. RateLimitConfig
+
+We decided that configuration should be separate from runtime state.
+
+For Fixed Window:
+
+```text
+RateLimitConfig
+----------------
+limit
+windowSize
+```
+
+Example:
+
+```text
+limit = 5
+window = 60 seconds
+```
+
+Configuration is different from runtime state.
+
+### Configuration
+
+```text
+limit = 5
+windowSize = 60 sec
+```
+
+### Runtime state
+
+```text
+user1 → count = 3
+user2 → count = 5
+```
+
+---
+
+# 10. Should Config Be Inside RateLimiter?
+
+No.
+
+`RateLimiter` should not contain algorithm-specific configuration.
+
+Different algorithms require different configuration.
+
+### Fixed Window
+
+```text
+limit
+windowSize
+```
+
+### Token Bucket
+
+```text
+capacity
+refillRate
+```
+
+### Leaky Bucket
+
+```text
+capacity
+leakRate
+```
+
+Therefore, a cleaner design is:
+
+```text
+FixedWindowStrategy
+        |
+        ↓
+FixedWindowConfig
+
+
+TokenBucketStrategy
+        |
+        ↓
+TokenBucketConfig
+```
+
+The concept of configuration is common, but the actual fields can differ between strategies.
+
+---
+
+# 11. Runtime State Belongs to Concrete Strategy
+
+This was an important design decision.
+
+`RateLimiter` should NOT maintain algorithm-specific state.
+
+The **concrete strategy owns its own state**.
+
+For Fixed Window:
+
+```text
+FixedWindowStrategy
+
+user1 → { count, windowStart }
+user2 → { count, windowStart }
+```
+
+For Token Bucket:
+
+```text
+TokenBucketStrategy
+
+user1 → { tokens, lastRefillTime }
+user2 → { tokens, lastRefillTime }
+```
+
+Therefore:
+
+```text
+RateLimiter
+    |
+    ↓
+Strategy
+    |
+    +── owns algorithm-specific state
+```
+
+This keeps `RateLimiter` completely unaware of implementation details.
+
+---
+
+# 12. Fixed Window Algorithm
+
+Suppose:
+
+```text
+limit = 5
+window = 60 seconds
+```
+
+For every user we maintain:
+
+```cpp
+struct UserState {
+    int count;
+    long long windowStart;
+};
+```
+
+And:
+
+```cpp
+unordered_map<string, UserState> users;
+```
+
+Conceptually:
+
+```text
+user1 → count = 3, windowStart = 10:00
+user2 → count = 5, windowStart = 10:01
+```
+
+---
+
+# 13. Fixed Window Request Flow
+
+For every request:
+
+```text
+allowRequest(userId)
+        |
+        ↓
+Is window expired?
+      /   \
+    YES    NO
+     |      |
+     ↓      ↓
+Reset    Is limit reached?
+count      /       \
+         YES        NO
+          |          |
+       REJECT      increment
+                     |
+                   ALLOW
+```
+
+### Case 1: Window expired
+
+Example:
+
+```text
+windowStart = 10:00
+currentTime = 10:01:05
+window = 60 sec
+```
+
+Window expired.
+
+Therefore:
+
+```text
+count = 1
+windowStart = currentTime
+ALLOW
+```
+
+### Case 2: Window still active and limit reached
+
+```text
+count = 5
+limit = 5
+window still active
+```
+
+Result:
+
+```text
+REJECT
+```
+
+Do NOT reset the counter.
+
+### Case 3: Window active and capacity available
+
+```text
+count = 3
+limit = 5
+```
+
+Then:
+
+```text
+count++
+ALLOW
+```
+
+---
+
+# 14. Thread Safety
+
+We discussed an important concurrency issue.
+
+Suppose:
+
+```text
+limit = 5
+counter = 4
+```
+
+Two threads arrive simultaneously.
+
+Without synchronization:
+
+```text
+Thread 1 → sees 4
+Thread 2 → sees 4
+
+Thread 1 → increments to 5 → ALLOW
+Thread 2 → increments to 6 → ALLOW
+```
+
+Now we've allowed 6 requests.
+
+### Atomic alone is not necessarily enough
+
+The operation is:
+
+```text
+check counter < limit
++
+increment counter
+```
+
+These two operations need to behave atomically as a single operation.
+
+So a mutex can protect the entire operation:
+
+```cpp
+lock_guard<mutex> lock(mtx);
+
+if (count >= limit)
+    return false;
+
+count++;
+
+return true;
+```
+
+For a simple interview implementation, a mutex is perfectly reasonable.
+
+For higher concurrency, we can discuss **per-user locking** instead of one global mutex.
+
+---
+
+# 15. Client Interaction
+
+We decided the client should explicitly call the limiter.
+
+```cpp
+if (rateLimiter.allowRequest(userId)) {
+    // send request
+}
+```
+
+Rather than hiding rate limiting inside:
+
+```cpp
+client.sendRequest();
+```
+
+The responsibility separation is:
+
+```text
+Client
+    |
+    | wants to send request
+    ↓
+RateLimiter
+    |
+    | decide
+    ↓
+ALLOW / REJECT
+```
+
+The client doesn't need to know the algorithm.
+
+---
+
+# 16. Server-Side Interaction
+
+The server can also use the same `RateLimiter` abstraction.
+
+```text
+Client
+   |
+   ↓
+Client RateLimiter
+   |
+   ↓
+Server
+   |
+   ↓
+Server RateLimiter
+   |
+   ↓
+Service
+```
+
+We don't need separate `ClientRateLimiter` and `ServerRateLimiter` classes if their core responsibility is identical.
+
+We can simply have separate **instances** of the same `RateLimiter` class.
+
+For example:
+
+```text
+Client
+  ↓
+RateLimiter A
+  ↓
+Server
+  ↓
+RateLimiter B
+  ↓
+Service
+```
+
+They can have different strategies/configurations.
+
+---
+
+# 17. Final Class Relationship
+
+The design we reached:
+
+```text
+                         Client
+                           |
+                           | allowRequest(userId)
+                           ↓
+                      RateLimiter
+                           |
+                           | HAS-A
+                           ↓
+                RateLimitingStrategy
+                   /       |        \
+                  /        |         \
+                 ↓         ↓          ↓
+              Fixed     Sliding     Token
+              Window     Window      Bucket
+                 |         |           |
+                 ↓         ↓           ↓
+              Config     Config      Config
+                 |         |           |
+                 ↓         ↓           ↓
+              State      State        State
+```
+
+The key relationship is:
+
+```text
+RateLimiter HAS-A RateLimitingStrategy
+```
+
+not:
+
+```text
+RateLimiter IS-A RateLimitingStrategy
+```
+
+---
+
+# 18. Interview Explanation in 30 Seconds
+
+If the interviewer asks:
+
+> "Explain your design."
+
+Say:
+
+> "I'll use the Strategy Pattern because the rate-limiting algorithm can vary. `RateLimiter` will act as the context and hold a `RateLimitingStrategy`. The strategy interface exposes `allowRequest(userId)`, with concrete implementations such as Fixed Window, Sliding Window, and Token Bucket. Each concrete strategy owns its algorithm-specific configuration and per-user runtime state, so `RateLimiter` remains independent of the implementation details. I'll use composition and `unique_ptr` for ownership, and synchronization around the check-and-update operation for thread safety."
+
+---
+
+# 19. What We Actually Implemented Today
+
+For the first implementation, we implemented:
+
+```text
+RateLimitingStrategy
+        ↓
+FixedWindowStrategy
+        ↓
+RateLimiter
+        ↓
+Client
+```
+
+The important code structure:
+
+```cpp
+class RateLimiter {
+private:
+    unique_ptr<RateLimitingStrategy> strategy;
+
+public:
+    RateLimiter(unique_ptr<RateLimitingStrategy> strategy)
+        : strategy(move(strategy)) {}
+
+    bool allowRequest(const string& userId) {
+        return strategy->allowRequest(userId);
+    }
+};
+```
+
+And:
+
+```cpp
+class FixedWindowStrategy : public RateLimitingStrategy {
+    // configuration
+    // per-user state
+    // fixed-window algorithm
+};
+```
+
+---
+
+# 20. Things We Did NOT Need to Overdesign
+
+For a **30–40 minute LLD interview**, don't unnecessarily dive into:
+
+* Factory Pattern immediately
+* Distributed Redis implementation
+* Sharding
+* API Gateway internals
+* Multiple configuration hierarchies
+* Retry-after implementation
+* Complex locking schemes
+* Persistence
+
+Mention them only if the interviewer asks.
+
+The core design is enough:
+
+```text
+Actor
+ ↓
+RateLimiter
+ ↓
+Strategy
+ ↓
+Concrete Algorithm
+ ↓
+Per-user State
+```
+
+---
+
+# 21. Tomorrow's Revision Checklist
+
+Before moving on, make sure you can answer these without looking:
+
+* [ ] What is the main use case of a rate limiter?
+* [ ] Who are the actors?
+* [ ] Why do we use Strategy Pattern?
+* [ ] What is the responsibility of `RateLimiter`?
+* [ ] What is the responsibility of `RateLimitingStrategy`?
+* [ ] Why does `RateLimiter` contain the strategy instead of inheriting from it?
+* [ ] Why does the strategy own algorithm-specific state?
+* [ ] What is configuration vs runtime state?
+* [ ] Why does `unique_ptr` need `std::move()` here?
+* [ ] What exactly does `strategy->allowRequest(userId)` do?
+* [ ] How does Fixed Window work?
+* [ ] What happens when the window expires?
+* [ ] What happens when the limit is reached?
+* [ ] Why is thread synchronization required?
+* [ ] Why isn't making the counter atomic automatically enough?
+* [ ] How does the client interact with the RateLimiter?
+* [ ] Can the same `RateLimiter` abstraction be used on the server?
+* [ ] Can we add Token Bucket without modifying `RateLimiter`?
+
+### The one diagram to remember
+
+```text
+             Client
+                |
+                ↓
+          RateLimiter
+                |
+                ↓
+      RateLimitingStrategy
+          /      |      \
+         /       |       \
+      Fixed    Sliding   Token
+      Window    Window   Bucket
+         |
+         ↓
+   Algorithm-specific
+      State + Config
+```
+
+**If you remember this diagram + the responsibilities, you can reconstruct most of the code tomorrow.**
