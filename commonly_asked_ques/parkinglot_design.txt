@@ -1,0 +1,512 @@
+PARKING LOT LLD - REVISED INTERVIEW NOTES Based on the final design/code
+we discussed
+
+============================================================ 1. PROBLEM
+============================================================
+
+Design a Parking Lot system where:
+
+User can: - Park a vehicle - Unpark a vehicle - Pay the parking bill
+
+Parking spots have different types: - BIKE - CAR - TRUCK
+
+The system must assign a compatible available spot to a vehicle.
+
+============================================================ 2. ACTORS
+============================================================
+
+User: - Parks vehicle - Unparks vehicle - Pays bill
+
+Manager/Admin: - Can add/manage parking spots - Can register/configure
+spot-selection strategies
+
+Vehicle: - Treat as a domain entity rather than a UML actor. - Vehicle
+is identified by its license plate.
+
+============================================================ 3. MAIN
+CLASSES ============================================================
+
+Vehicle ParkingSpot ParkingTicket ParkingLot Payment
+
+Strategy: SpotSelectionStrategy -> BikeSpotSelectionStrategy ->
+CarSpotSelectionStrategy -> TruckSpotSelectionStrategy
+
+============================================================ 4. VEHICLE
+============================================================
+
+Vehicle contains:
+
+-   licensePlate
+-   vehicleType
+
+Example:
+
+Vehicle car(“UP14AB1234”, VehicleType::CAR);
+
+VehicleType:
+
+enum class VehicleType { BIKE, CAR, TRUCK };
+
+License plate is used to identify the vehicle.
+
+Important: Do not create separate Bike/Car/Truck classes merely because
+the data differs. Separate classes are justified when behavior differs.
+
+============================================================ 5. PARKING
+SPOT ============================================================
+
+ParkingSpot represents the physical parking location.
+
+It contains:
+
+-   id
+-   type
+-   occupied/free
+-   occupantPlate
+
+SpotType:
+
+enum class SpotType { BIKE, CAR, TRUCK };
+
+We store the license plate rather than a Vehicle*.
+
+Reason: The caller owns the Vehicle, so ParkingSpot should not keep a
+raw pointer that could become dangling if the Vehicle’s lifetime ends.
+
+ParkingSpot operations:
+
+-   isAvailable()
+-   assignVehicle()
+-   removeVehicle()
+
+Pricing is NOT stored in ParkingSpot because pricing is a
+billing/business-rule concern, not a physical spot property.
+
+============================================================ 6. PARKING
+TICKET ============================================================
+
+ParkingTicket represents a parking session.
+
+It contains:
+
+-   ticketId
+-   licensePlate
+-   spotId
+-   entryTime
+
+It allows us to: - Identify the parked vehicle - Identify the occupied
+spot - Calculate parking duration - Calculate the bill
+
+The ticket is created when the vehicle is successfully parked.
+
+============================================================ 7. PARKING
+LOT ============================================================
+
+ParkingLot owns/manages:
+
+-   Parking spots
+-   Spot-selection strategies
+-   Ticket IDs
+
+Important design decision:
+
+Instead of having ONE strategy for the entire parking lot, ParkingLot
+maintains a strategy for each VehicleType.
+
+Conceptually:
+
+ParkingLot | +– CAR -> CarSpotSelectionStrategy +– BIKE ->
+BikeSpotSelectionStrategy +– TRUCK -> TruckSpotSelectionStrategy
+
+Implementation:
+
+unordered_map< VehicleType, unique_ptr > strategies;
+
+This means ParkingLot selects the correct strategy using:
+
+vehicle.getType()
+
+============================================================ 8. STRATEGY
+PATTERN ============================================================
+
+We use Strategy Pattern for spot selection.
+
+Interface:
+
+SpotSelectionStrategy
+
+Common method:
+
+findSpot(spots, vehicle)
+
+Concrete strategies:
+
+SpotSelectionStrategy | +– BikeSpotSelectionStrategy +–
+CarSpotSelectionStrategy +– TruckSpotSelectionStrategy
+
+Each strategy implements its own spot-selection logic.
+
+For the current design: - Bike strategy looks for an available BIKE
+spot. - Car strategy looks for an available CAR spot. - Truck strategy
+looks for an available TRUCK spot.
+
+============================================================ 9. WHY
+STRATEGY PATTERN?
+============================================================
+
+We don’t want ParkingLot to contain logic like:
+
+if (bike) { … } else if (car) { … } else if (truck) { … }
+
+Instead:
+
+ParkingLot | -> find correct strategy | -> strategy->findSpot(…)
+
+This keeps spot-selection logic separate from ParkingLot.
+
+It also makes the design extensible.
+
+For example, later we could introduce:
+
+-   NearestSpotStrategy
+-   CheapestSpotStrategy
+-   FirstAvailableStrategy
+
+without putting all those rules inside ParkingLot.
+
+IMPORTANT: Do not add patterns just for the sake of adding patterns. Use
+a pattern when there is actual variation in behavior.
+
+============================================================ 10. HAS-A
+VS IS-A ============================================================
+
+HAS-A -> Composition
+
+ParkingLot HAS-A SpotSelectionStrategy.
+
+In this design, ParkingLot owns strategies using:
+
+unique_ptr
+
+IS-A -> Inheritance
+
+CarSpotSelectionStrategy IS-A SpotSelectionStrategy.
+
+Example:
+
+class CarSpotSelectionStrategy : public SpotSelectionStrategy
+
+Mental shortcut:
+
+“Is this a type of that?” -> Inheritance
+
+“Does this contain/use/own that?” -> Composition
+
+Examples:
+
+CarSpotSelectionStrategy IS-A SpotSelectionStrategy
+
+ParkingLot HAS-A SpotSelectionStrategy
+
+============================================================ 11.
+STRATEGY OWNERSHIP
+============================================================
+
+ParkingLot owns the strategy objects.
+
+Example:
+
+registerStrategy( VehicleType::CAR, make_unique() );
+
+The unique_ptr means: - Ownership is clear. - ParkingLot owns the
+strategy. - No manual delete is required.
+
+The strategy is moved into the map.
+
+============================================================ 12. PARKING
+FLOW ============================================================
+
+ENTRY:
+
+1.  Vehicle arrives.
+2.  ParkingLot receives the Vehicle.
+3.  ParkingLot checks vehicle.getType().
+4.  It finds the corresponding strategy in the map.
+5.  Strategy searches for a compatible available ParkingSpot.
+6.  If no spot exists, return nullptr.
+7.  If a spot exists:
+    -   Assign the vehicle to the spot.
+    -   Create ParkingTicket.
+    -   Return the ticket.
+
+Flow:
+
+Vehicle | v ParkingLot | v vehicle.getType() | v Correct
+SpotSelectionStrategy | v findSpot() | v ParkingSpot | v assignVehicle()
+| v ParkingTicket
+
+============================================================ 13. PARKING
+FLOW - CODE RESPONSIBILITY
+============================================================
+
+ParkingLot::parkVehicle(vehicle)
+
+Responsibilities:
+
+-   Find correct strategy
+-   Ask strategy for available spot
+-   Handle “no spot available”
+-   Assign vehicle to spot
+-   Create ticket
+-   Return ticket
+
+The strategy is responsible only for:
+
+“Which spot should be selected?”
+
+This is a good separation of responsibility.
+
+============================================================ 14. TICKET
+OWNERSHIP ============================================================
+
+parkVehicle() returns:
+
+unique_ptr
+
+Example:
+
+unique_ptr ticket = parkingLot.parkVehicle(car);
+
+When the vehicle exits:
+
+parkingLot.unparkVehicle( move(ticket), payment );
+
+unparkVehicle() takes ownership of the ticket.
+
+This avoids: - Manual delete - Memory leaks - Unclear ticket ownership
+
+The unique_ptr automatically cleans up the ticket when the function
+finishes.
+
+============================================================ 15. UNPARK
+FLOW ============================================================
+
+When a vehicle exits:
+
+ParkingTicket | v Find spot using ticket->getSpotId() | v Calculate
+duration | v Calculate bill | v Payment | v Free parking spot
+
+In the current design:
+
+calculateBill(ticket) -> duration in hours -> hours * 50
+
+Example:
+
+Rs. 50/hour
+
+============================================================ 16. PAYMENT
+============================================================
+
+Current Payment class is intentionally simple:
+
+Payment | -> pay(amount)
+
+It returns whether payment succeeded.
+
+Current design does NOT overcomplicate payment.
+
+If the interviewer later requires multiple payment methods, we can
+introduce an abstraction such as:
+
+PaymentStrategy | +– CashPayment +– CardPayment +– UpiPayment
+
+But don’t introduce it unless the requirement exists.
+
+============================================================ 17. PRICING
+============================================================
+
+Current implementation uses simple pricing:
+
+hours * 50.0
+
+Pricing is kept outside ParkingSpot.
+
+If requirements become more complex:
+
+-   Vehicle-based pricing
+-   Peak-hour pricing
+-   Dynamic pricing
+-   Membership pricing
+
+then a PricingStrategy could be introduced.
+
+Again: Don’t pattern-bomb the design.
+
+============================================================ 18.
+IMPORTANT C++ DESIGN POINTS
+============================================================
+
+unique_ptr: Use when one object owns another object.
+
+ParkingLot owns: - ParkingSpot objects - SpotSelectionStrategy objects
+
+ParkingTicket is also managed with unique_ptr.
+
+move(): Used to transfer ownership of unique_ptr.
+
+Example:
+
+registerStrategy( VehicleType::CAR, make_unique() );
+
+The unique_ptr is moved into the ParkingLot’s map.
+
+Similarly:
+
+unparkVehicle(move(ticket), payment);
+
+transfers ticket ownership to unparkVehicle().
+
+============================================================ 19. FINAL
+CLASS RELATIONSHIP
+============================================================
+
+                    ParkingLot
+                    /        \
+                   /          \
+                  v            v
+        ParkingSpot[]    strategies map
+                              |
+                              v
+                  SpotSelectionStrategy
+                    /       |       \
+                   v        v        v
+                Bike      Car      Truck
+               Strategy  Strategy  Strategy
+
+Vehicle
+
+licensePlate vehicleType
+
+ParkingSpot
+
+id type occupied occupantPlate
+
+ParkingTicket
+
+ticketId licensePlate spotId entryTime
+
+Payment
+
+pay(amount)
+
+============================================================ 20. CORE
+DESIGN RELATIONSHIPS
+============================================================
+
+ParkingLot HAS-A ParkingSpot collection
+
+ParkingLot HAS-A multiple SpotSelectionStrategy objects
+
+CarSpotSelectionStrategy IS-A SpotSelectionStrategy
+
+BikeSpotSelectionStrategy IS-A SpotSelectionStrategy
+
+TruckSpotSelectionStrategy IS-A SpotSelectionStrategy
+
+ParkingTicket associates: - Vehicle/license plate - ParkingSpot - Entry
+time
+
+============================================================ 21. WHAT
+NOT TO OVERDESIGN IN A 30-40 MINUTE INTERVIEW
+============================================================
+
+Do NOT immediately add:
+
+-   Factory
+-   Repository
+-   Database
+-   Microservices
+-   Notification service
+-   Payment gateway
+-   Distributed locking
+-   Multiple floors
+-   Dynamic pricing
+-   Complex billing engine
+
+Start with:
+
+ParkingLot Vehicle ParkingSpot ParkingTicket Payment
+SpotSelectionStrategy
+
+Then extend only if the interviewer adds requirements.
+
+============================================================ 22.
+INTERVIEW EXPLANATION
+============================================================
+
+“I have a ParkingLot that manages parking spots and the
+parking/unparking flow. Vehicle contains the license plate and vehicle
+type, while ParkingSpot represents the physical spot and its
+availability.
+
+For spot selection, I use the Strategy Pattern. ParkingLot maintains a
+strategy per vehicle type, so when a vehicle arrives, it selects the
+appropriate strategy and asks it to find a compatible available spot.
+
+Once a spot is found, ParkingLot assigns the vehicle and creates a
+ParkingTicket containing the ticket ID, license plate, spot ID and entry
+time.
+
+When the vehicle exits, the ticket is used to calculate the parking
+duration and bill, payment is processed, and the spot is freed.”
+
+============================================================ 23.
+QUESTIONS TO REVISE TOMORROW
+============================================================
+
+1.  What are the actors?
+2.  What are the main use cases?
+3.  Why do we need a license plate?
+4.  Why do we need ParkingTicket?
+5.  What information belongs in ParkingSpot?
+6.  Why don’t we put price in ParkingSpot?
+7.  Why do we need SpotSelectionStrategy?
+8.  Why does ParkingLot have a strategy map instead of one strategy?
+9.  Why use Strategy Pattern?
+10. What is HAS-A?
+11. What is IS-A?
+12. Why is ParkingLot HAS-A Strategy?
+13. Why is CarSpotSelectionStrategy IS-A Strategy?
+14. Why use unique_ptr?
+15. Why use move()?
+16. What happens when a vehicle enters?
+17. What happens when a vehicle exits?
+18. Why does ParkingSpot store occupantPlate instead of Vehicle*?
+19. When would you introduce PricingStrategy?
+20. When would you introduce different Payment strategies?
+21. What would you avoid implementing in a 30-40 minute interview?
+
+============================================================ 24. TWO
+DIAGRAMS TO REMEMBER
+============================================================
+
+STRATEGY:
+
+          ParkingLot
+              |
+            HAS-A
+              |
+              v
+      SpotSelectionStrategy
+          /    |    \
+         v     v     v
+       Bike   Car   Truck
+      Strategy Strategy Strategy
+
+PARKING FLOW:
+
+Vehicle | v ParkingLot | v vehicle.getType() | v Correct Strategy | v
+findSpot() | v ParkingSpot | v ParkingTicket | v Calculate Bill | v
+Payment | v Free Spot
+
+============================================================ END
